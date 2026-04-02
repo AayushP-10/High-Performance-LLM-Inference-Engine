@@ -1,109 +1,120 @@
-.. image:: https://github.com/jeffwigger/FastDynamicBatcher/actions/workflows/test_pip.yaml/badge.svg
-     :target: https://github.com/JeffWigger/FastDynamicBatcher/actions
-     :alt: Workflow Status
+# LLM Inference Enginer
 
-Fast Dynamic Batcher
-====================
+Efficient handling of machine learning inference requests often relies on batching multiple inputs together. Instead of processing each request individually, combining them into a single batch can significantly improve performance, particularly on GPUs.
 
-Bundling several ML model inputs into a larger batch is the simplest way to achieve
-significant inference speed-ups in ML workloads. The **Fast Dynamic Batcher** library has
-been built to make it easy to use such dynamic batches in Python web frameworks like FastAPI. With our
-dynamic batcher, you can combine the inputs of several requests into a
-single batch, which can then be run more efficiently on GPUs. In our testing, we achieved up to 2.5x more throughput with it.
+This project provides a simple way to implement dynamic batching in Python-based web frameworks such as FastAPI. Incoming requests are grouped together and processed as a batch, enabling better utilization of compute resources and higher throughput. In testing, this approach achieved up to 2.5× higher throughput compared to non-batched execution.
 
-Example Usage
--------------
+## Overview
 
-To use dynamic batching in FastAPI, you have to first
-create an instance of the ``InferenceModel`` class. Initiate your ML
-model in its ``init`` method and use it in its ``infer`` method:
+The dynamic batching system collects incoming requests and processes them based on two conditions:
 
-.. code-block:: python
+- The batch reaches a predefined maximum size  
+- A specified delay threshold is exceeded  
 
-   from typing import Any
-   from fast_dynamic_batcher.inference_template import InferenceModel
+This allows the system to balance latency and throughput, ensuring efficient execution without introducing excessive delays.
 
+## Example Usage
 
-   class DemoModel(InferenceModel):
-      def __init__(self):
-          super().__init__()
-          # Initiate your ML model here
+To enable dynamic batching, define a custom inference model by extending the `InferenceModel` base class. Initialize your ML model in the constructor and implement the batch processing logic inside the `infer` method.
 
-      def infer(self, inputs: list[Any]) -> list[Any]:
-          # Run your inputs as a batch for your model
-          ml_output = ... # Your inference outputs
-          return ml_output
+```python
+from typing import Any
+from fast_dynamic_batcher.inference_template import InferenceModel
 
-Subsequently, use your ``InferenceModel`` instance to initiate our
-``DynBatcher``:
+class DemoModel(InferenceModel):
+    def __init__(self):
+        super().__init__()
+        # Initialize your ML model here
 
-.. code-block:: python
+    def infer(self, inputs: list[Any]) -> list[Any]:
+        # Run inference on the batch
+        outputs = ...  # Replace with actual model outputs
+        return outputs
+```
 
-   from contextlib import asynccontextmanager
+Next, initialize the dynamic batcher within the FastAPI application lifecycle:
 
-   from anyio import CapacityLimiter
-   from anyio.lowlevel import RunVar
+```python
+from contextlib import asynccontextmanager
+from anyio import CapacityLimiter
+from anyio.lowlevel import RunVar
+from fast_dynamic_batcher.dyn_batcher import DynBatcher
+from fastapi import FastAPI
 
-   from fast_dynamic_batcher.dyn_batcher import DynBatcher
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    RunVar("_default_thread_limiter").set(CapacityLimiter(16))
+    global dyn_batcher
+    dyn_batcher = DynBatcher(
+        DemoModel,
+        max_batch_size=8,
+        max_delay=0.1
+    )
+    yield
+    dyn_batcher.stop()
 
+app = FastAPI(lifespan=lifespan)
 
-   @asynccontextmanager
-   async def lifespan(app: FastAPI):
-      RunVar("_default_thread_limiter").set(CapacityLimiter(16))
-      global dyn_batcher
-      dyn_batcher = DynBatcher(DemoModel, max_batch_size = 8, max_delay = 0.1)
-      yield
-      dyn_batcher.stop()
+@app.post("/predict/")
+async def predict(input_model: YourInputPydanticModel):
+    return await dyn_batcher.process_batched(input_model)
+```
 
-   app = FastAPI(lifespan=lifespan)
+## How It Works
 
-   @app.post("/predict/")
-   async def predict(
-      input_model: YourInputPydanticModel
-   ):
-      return await dyn_batcher.process_batched(input_model)
+- Incoming API requests are placed into a temporary queue  
+- The system waits until either:
+  - the number of requests reaches `max_batch_size`, or  
+  - `max_delay` seconds have passed  
+- Once one of these conditions is satisfied, the batch is processed  
+- The batch is passed to the model’s `infer` method  
+- Outputs are returned individually to each request  
 
-The ``DynBatcher`` can be initiated in the FastAPI lifespans as a global
-variable. It can be further customized with the ``max_batch_size``
-and ``max_delay`` variables. Subsequently, use it in your
-FastAPI endpoints by registering your inputs by calling its
-``process_batched`` method.
+This mechanism allows batch sizes to adapt dynamically based on traffic, improving efficiency without manual tuning.
 
-Our dynamic batching algorithm will then wait for either the number of
-inputs to equal the ``max_batch_size``, or until ``max_delay`` seconds have
-passed. In the latter case, a batch may contain between 1 and
-``max_batch_size`` inputs. Once, either condition is met, a batch will
-be processed by calling the ``infer`` method of your ``InferenceModel``
-instance.
+## Configuration
 
-Installation
-------------
+The batching behavior can be customized using:
 
-The Fast Dynamic Batcher library can be installed with pip:
+- **max_batch_size**: Maximum number of requests in a batch  
+- **max_delay**: Maximum waiting time before processing  
 
-.. code-block:: bash
+These parameters allow tuning for different system goals:
 
-   pip install fast_dynamic_batcher
+- Lower delay improves latency  
+- Larger batch sizes improve throughput  
 
+## Installation
 
-Performance Tests
------------------
+Install the library using pip:
 
-We tested the performance of our dynamic batching solution against a baseline without batching on a Colab instance with a T4 GPU as well as on a laptop with an Intel i7-1250U CPU.
-The experiments were conducted by using this `testing script <https://github.com/JeffWigger/FastDynamicBatcher/blob/main/test/test_dyn_batcher.py>`_. The results are reported in the table below:
+```bash
+pip install fast_dynamic_batcher
+```
 
-.. list-table:: Performance Experiments
-   :widths: 40 30 30
-   :header-rows: 1
+## Performance Evaluation
 
-   * - Hardware
-     - No Batching
-     - Dynamic Batch size of 16
-   * - Colab T4 GPU
-     - 7.65s
-     - 3.07s
-   * - CPU Intel i7-1250U
-     - 117.10s
-     - 88.47s
+The system was tested against a baseline without batching on both GPU and CPU environments.
 
-On GPUs, which benefit greatly from large batch sizes, we achieved a speed-up of almost 2.5x by creating dynamic batches of size 16. On CPUs, the gains are more modest with a speed-up of 1.3x.
+| Hardware            | No Batching | Dynamic Batch (size = 16) |
+|--------------------|------------|---------------------------|
+| Colab T4 GPU       | 7.65s      | 3.07s                     |
+| Intel i7-1250U CPU | 117.10s    | 88.47s                    |
+
+### Observations
+
+- GPUs benefit significantly from batching due to parallel execution  
+- Achieved nearly 2.5× speedup on GPU workloads  
+- CPU performance improved by approximately 1.3×  
+
+## Key Benefits
+
+- Increased inference throughput  
+- Improved hardware utilization  
+- Reduced overhead per request  
+- Easy integration with FastAPI  
+- Flexible control over latency and efficiency tradeoffs  
+
+## Summary
+
+This project demonstrates how dynamic batching can be integrated into modern inference pipelines with minimal complexity. By intelligently grouping requests and processing them together, it enables scalable and efficient deployment of machine learning models in real-world applications.
